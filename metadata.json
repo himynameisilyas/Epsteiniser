@@ -1,0 +1,7 @@
+{
+  "name": "Epsteiniser",
+  "description": "An AI-powered tool that detects people in images and applies high-contrast black redaction bars, inspired by investigative journalism styles.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
