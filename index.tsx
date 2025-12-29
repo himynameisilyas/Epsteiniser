@@ -1,37 +1,45 @@
 
+// @google/genai guidelines: always use { apiKey: process.env.API_KEY }
 import { GoogleGenAI, Type } from "@google/genai";
 
-// --- Состояние приложения ---
-let currentFile = null;
-let currentImageUrl = null;
-let detectedBoxes = [];
+/**
+ * EPSTEINISER - Archive Visual Processor
+ * Vanilla JavaScript Implementation
+ */
 
-// --- Элементы DOM ---
-// Fix: Cast element to HTMLInputElement to access .files and .value
-const fileInput = document.getElementById('file-upload') as HTMLInputElement;
-const uploadLabel = document.getElementById('upload-label');
-const processBtn = document.getElementById('process-btn');
-const loadingState = document.getElementById('loading-state');
-const resultActions = document.getElementById('result-actions');
-const downloadBtn = document.getElementById('download-btn');
-const resetBtn = document.getElementById('reset-btn');
-const logStatus = document.getElementById('log-status');
-const placeholder = document.getElementById('placeholder');
-// Fix: Cast element to HTMLCanvasElement to access .getContext, .width, .height, and .toDataURL
-const mainCanvas = document.getElementById('main-canvas') as HTMLCanvasElement;
-const scanningOverlay = document.getElementById('scanning-overlay');
+// --- Global Application State ---
+let currentFile: File | null = null;
+let currentImageUrl: string | null = null;
+let detectedBoxes: any[] = [];
 
-// --- Логика ИИ ---
-async function detectFaces(base64Image) {
-  // Инициализация API ключа из переменных окружения
+// --- DOM Element References ---
+// Fix: Added type assertions to DOM elements to resolve property errors (e.g., getContext, width, height, value, toDataURL)
+const elements = {
+  fileInput: document.getElementById('file-upload') as HTMLInputElement,
+  uploadLabel: document.getElementById('upload-label') as HTMLElement,
+  processBtn: document.getElementById('process-btn') as HTMLElement,
+  loadingState: document.getElementById('loading-state') as HTMLElement,
+  resultActions: document.getElementById('result-actions') as HTMLElement,
+  downloadBtn: document.getElementById('download-btn') as HTMLElement,
+  resetBtn: document.getElementById('reset-btn') as HTMLElement,
+  logStatus: document.getElementById('log-status') as HTMLElement,
+  placeholder: document.getElementById('placeholder') as HTMLElement,
+  mainCanvas: document.getElementById('main-canvas') as HTMLCanvasElement,
+  scanningOverlay: document.getElementById('scanning-overlay') as HTMLElement,
+};
+
+/**
+ * Detects faces using the Gemini 3 Flash model with a structured JSON schema.
+ */
+async function detectFaces(base64Image: string) {
+  // Fix: Initializing GoogleGenAI with the required named parameter
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   
   const response = await ai.models.generateContent({
     model: 'gemini-3-flash-preview',
-    // Fix: Use recommended contents structure for multi-part requests
     contents: {
       parts: [
-        { text: "Detect every person/face in this image. Return their bounding boxes in normalized [ymin, xmin, ymax, xmax] format (0-1000). Only return valid JSON." },
+        { text: "Detect every person's face in this image. Return their bounding boxes in normalized [ymin, xmin, ymax, xmax] format (values from 0 to 1000). Provide valid JSON only." },
         { inlineData: { mimeType: "image/jpeg", data: base64Image } }
       ]
     },
@@ -45,7 +53,11 @@ async function detectFaces(base64Image) {
             items: {
               type: Type.OBJECT,
               properties: {
-                box_2d: { type: Type.ARRAY, items: { type: Type.NUMBER } }
+                box_2d: { 
+                  type: Type.ARRAY, 
+                  items: { type: Type.NUMBER },
+                  description: "[ymin, xmin, ymax, xmax]"
+                }
               },
               required: ["box_2d"]
             }
@@ -56,40 +68,48 @@ async function detectFaces(base64Image) {
     }
   });
 
-  // Fix: Property 'text' is accessed directly (not as a function)
-  const data = JSON.parse(response.text || '{}');
-  return data.boxes;
+  try {
+    // Fix: Access response.text directly (it is a property, not a method)
+    const data = JSON.parse(response.text || '{"boxes": []}');
+    return data.boxes;
+  } catch (err) {
+    console.error("Failed to parse AI response:", err);
+    return [];
+  }
 }
 
-// --- Отрисовка на холсте ---
-function renderCensoredImage(img, boxes) {
-  // Fix: Property 'getContext' exists on HTMLCanvasElement
-  const ctx = mainCanvas.getContext('2d');
+/**
+ * Renders the image on canvas and applies redaction bars.
+ */
+function processAndRender(img: HTMLImageElement, boxes: any[]) {
+  const canvas = elements.mainCanvas;
+  const ctx = canvas.getContext('2d');
   if (!ctx) return;
 
-  // Установка размеров холста в соответствии с изображением
-  // Fix: Property 'width' and 'height' exist on HTMLCanvasElement
-  mainCanvas.width = img.width;
-  mainCanvas.height = img.height;
-  mainCanvas.classList.remove('hidden');
-  placeholder.classList.add('hidden');
+  // Match canvas dimensions to the original image
+  canvas.width = img.width;
+  canvas.height = img.height;
+  
+  // Update visibility
+  canvas.classList.remove('hidden');
+  elements.placeholder.classList.add('hidden');
 
-  // Рисуем исходное изображение
+  // Draw background
   ctx.drawImage(img, 0, 0);
 
-  // Коэффициент расширения: насколько квадрат больше лица
-  const expansionFactor = 0.5; 
+  // Redaction parameters
+  const expansionFactor = 0.55; // Ensure full facial coverage
 
   boxes.forEach((box) => {
     const [ymin, xmin, ymax, xmax] = box.box_2d;
     
-    // Fix: Using width and height from HTMLCanvasElement
-    let left = (xmin / 1000) * mainCanvas.width;
-    let top = (ymin / 1000) * mainCanvas.height;
-    let width = ((xmax - xmin) / 1000) * mainCanvas.width;
-    let height = ((ymax - ymin) / 1000) * mainCanvas.height;
+    // Scale normalized coordinates to pixels
+    let left = (xmin / 1000) * canvas.width;
+    let top = (ymin / 1000) * canvas.height;
+    let width = ((xmax - xmin) / 1000) * canvas.width;
+    let height = ((ymax - ymin) / 1000) * canvas.height;
 
-    // Центрированное расширение области цензуры
+    // Expand the box to cover eyes, hair, and jawline more effectively
     const padW = width * expansionFactor;
     const padH = height * expansionFactor;
     
@@ -98,99 +118,111 @@ function renderCensoredImage(img, boxes) {
     width += padW;
     height += padH;
 
-    // 1. Сплошной черный прямоугольник
+    // Apply the classic "Archive" black bar
     ctx.fillStyle = 'black';
     ctx.fillRect(left, top, width, height);
     
-    // 2. Тонкая белая рамка (стиль документа)
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
-    // Fix: Using width from HTMLCanvasElement
-    ctx.lineWidth = Math.max(1, mainCanvas.width / 1000); // Динамическая толщина
+    // Add high-contrast document edges
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+    ctx.lineWidth = Math.max(1, canvas.width / 1200);
     ctx.strokeRect(left, top, width, height);
   });
 }
 
-// --- Обработчики событий ---
+/**
+ * Event Listeners and Orchestration
+ */
 
-// Загрузка файла
-fileInput.addEventListener('change', (e) => {
-  // Fix: Cast e.target to HTMLInputElement to access .files
+// 1. File Upload Handler
+elements.fileInput.addEventListener('change', (e) => {
+  // Fix: Cast EventTarget to HTMLInputElement to access the 'files' property
   const target = e.target as HTMLInputElement;
   const file = target.files?.[0];
   if (!file) return;
 
   currentFile = file;
+  
+  // Revoke old object URL to avoid memory leaks
+  if (currentImageUrl) URL.revokeObjectURL(currentImageUrl);
   currentImageUrl = URL.createObjectURL(file);
   
-  uploadLabel.textContent = 'Change Input';
-  processBtn.classList.remove('hidden');
-  resultActions.classList.add('hidden');
-  placeholder.classList.remove('hidden');
-  mainCanvas.classList.add('hidden');
-  logStatus.textContent = `» SRC: ${file.name}`;
+  // UI Refresh
+  elements.uploadLabel.textContent = 'Change Source';
+  elements.processBtn.classList.remove('hidden');
+  elements.resultActions.classList.add('hidden');
+  elements.placeholder.classList.remove('hidden');
+  elements.mainCanvas.classList.add('hidden');
+  elements.logStatus.textContent = `» SRC: ${file.name.toUpperCase()}`;
 });
 
-// Запуск обработки
-processBtn.addEventListener('click', async () => {
+// 2. Process Button Handler
+elements.processBtn.addEventListener('click', async () => {
   if (!currentFile || !currentImageUrl) return;
 
-  processBtn.classList.add('hidden');
-  loadingState.classList.remove('hidden');
-  scanningOverlay.classList.remove('hidden');
-  logStatus.textContent = '» STATUS: ANALYZING BIOMETRICS...';
+  // UI Processing State
+  elements.processBtn.classList.add('hidden');
+  elements.loadingState.classList.remove('hidden');
+  elements.scanningOverlay.classList.remove('hidden');
+  elements.logStatus.textContent = '» STATUS: ANALYZING BIOMETRICS...';
 
   try {
     const reader = new FileReader();
-    reader.readAsDataURL(currentFile);
     reader.onload = async () => {
-      // Fix: Check if result is string before calling split
+      // Fix: Verify result is a string before using .split()
       const result = reader.result;
       if (typeof result === 'string') {
         const base64 = result.split(',')[1];
+        
+        // Step A: AI Detection
         detectedBoxes = await detectFaces(base64);
         
+        // Step B: Image Processing
         const img = new Image();
-        img.src = currentImageUrl;
+        img.src = currentImageUrl!;
         img.onload = () => {
-          renderCensoredImage(img, detectedBoxes);
+          processAndRender(img, detectedBoxes);
           
-          loadingState.classList.add('hidden');
-          scanningOverlay.classList.add('hidden');
-          resultActions.classList.remove('hidden');
-          logStatus.textContent = `» STATUS: ${detectedBoxes.length} TARGETS REDACTED`;
+          // Final UI Updates
+          elements.loadingState.classList.add('hidden');
+          elements.scanningOverlay.classList.add('hidden');
+          elements.resultActions.classList.remove('hidden');
+          elements.logStatus.textContent = `» STATUS: ${detectedBoxes.length} BIOMETRIC TARGETS REDACTED`;
         };
       }
     };
+    reader.readAsDataURL(currentFile);
   } catch (err) {
-    console.error('Processing error:', err);
-    alert('Analysis failed. Check console for details.');
-    loadingState.classList.add('hidden');
-    scanningOverlay.classList.add('hidden');
-    processBtn.classList.remove('hidden');
+    console.error('Terminal error during processing:', err);
+    elements.logStatus.textContent = '» STATUS: CRITICAL ERROR';
+    elements.loadingState.classList.add('hidden');
+    elements.scanningOverlay.classList.add('hidden');
+    elements.processBtn.classList.remove('hidden');
+    alert('Analysis failed. Protocol interrupted.');
   }
 });
 
-// Сброс
-resetBtn.addEventListener('click', () => {
+// 3. Reset Button Handler
+elements.resetBtn.addEventListener('click', () => {
   currentFile = null;
+  if (currentImageUrl) URL.revokeObjectURL(currentImageUrl);
   currentImageUrl = null;
   detectedBoxes = [];
   
-  // Fix: Property 'value' exists on HTMLInputElement
-  fileInput.value = '';
-  uploadLabel.textContent = 'Ingest Document';
-  processBtn.classList.add('hidden');
-  resultActions.classList.add('hidden');
-  placeholder.classList.remove('hidden');
-  mainCanvas.classList.add('hidden');
-  logStatus.textContent = '» STATUS: IDLE';
+  // Fix: fileInput is now correctly typed as HTMLInputElement allowing access to 'value'
+  elements.fileInput.value = '';
+  elements.uploadLabel.textContent = 'Ingest Document';
+  elements.processBtn.classList.add('hidden');
+  elements.resultActions.classList.add('hidden');
+  elements.placeholder.classList.remove('hidden');
+  elements.mainCanvas.classList.add('hidden');
+  elements.logStatus.textContent = '» STATUS: IDLE';
 });
 
-// Скачивание
-downloadBtn.addEventListener('click', () => {
+// 4. Export / Download Handler
+elements.downloadBtn.addEventListener('click', () => {
   const link = document.createElement('a');
-  link.download = `redacted-evidence-${Date.now()}.png`;
-  // Fix: Property 'toDataURL' exists on HTMLCanvasElement
-  link.href = mainCanvas.toDataURL('image/png');
+  link.download = `archive-redacted-${Date.now()}.png`;
+  // Fix: mainCanvas is now correctly typed as HTMLCanvasElement allowing access to 'toDataURL'
+  link.href = elements.mainCanvas.toDataURL('image/png');
   link.click();
 });
